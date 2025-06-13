@@ -1,0 +1,134 @@
+function run_multiple_ga_searches()
+    % Constants
+    Vcc = 18;
+    Vbe = 0.685;
+    B = 350;
+
+    % Targets
+    Av_target = -6;
+    Zin_target = 1e5;
+    Zout_target = 1e4;
+
+    % Variable bounds
+    lb = [1e4, 1e2, 0.001, 1e2]; % [Rb, Rc, Re1, Re2]
+    ub = [2e7, 20e3, 1e7, 1e7];
+
+    % GA options
+    options = optimoptions('ga', ...
+        'PopulationSize', 100000, ...
+        'MaxGenerations', 15, ...
+        'UseParallel', true, ...
+        'HybridFcn', @fmincon, ...
+        'FunctionTolerance', 1e-6, ...
+        'Display', 'iter');
+
+    % Storage
+    valid_solutions = [];
+    all_solutions = [];
+
+    attempts = 0;
+    runs = 0;
+    max_attempts = 20; %số lần tối đa lặp lại thuật toán
+    required_runs = 2; % số lần tối thiểu lặp lại thuật toán
+    old_solutions = [];
+
+    while runs < required_runs && attempts < max_attempts
+        [x, cost] = ga(@(x)objective(x, Vcc, Vbe, B, Av_target, Zin_target, Zout_target), ...
+                       4, [], [], [], [], lb, ub, [], options);
+
+        % Evaluate validity
+        [Av, Zin, Zout, Vce] = evaluate_params(x, Vcc, Vbe, B);
+        penalty = compute_penalty(Av, Zin, Zout, Vce, Av_target, Zin_target, Zout_target, Vcc);
+        is_valid = penalty == 0;
+
+        % Check duplicates (radius 1%)
+        is_duplicate = false;
+        for i = 1:size(old_solutions,1)
+            if all(abs((x - old_solutions(i,:)) ./ (ub - lb)) < 0.01)
+                is_duplicate = true;
+                break;
+            end
+        end
+
+        all_solutions = [all_solutions; x, Av, Zin, Zout, Vce, penalty]; %#ok<AGROW>
+
+        if is_valid && ~is_duplicate
+            valid_solutions = [valid_solutions; x, Av, Zin, Zout, Vce]; %#ok<AGROW>
+            old_solutions = [old_solutions; x]; %#ok<AGROW>
+            runs = runs + 1;
+            fprintf('✅ Valid solution found: Run %d\n', runs);
+        else
+            fprintf('❌ Invalid or duplicate solution. Retrying...\n');
+        end
+
+        attempts = attempts + 1;
+    end
+
+    if isempty(valid_solutions)
+        fprintf('❌ No valid solution found after %d attempts.\n', attempts);
+        % Show the least invalid solution
+        [~, idx] = min(all_solutions(:, end)); % Select solution with smallest penalty
+        best_invalid = all_solutions(idx, :);
+        fprintf('\n⚠️ Closest Invalid Solution (minimal penalty):\n');
+        fprintf('Rb = %.2f\n', best_invalid(1));
+        fprintf('Rc = %.2f\n', best_invalid(2));
+        fprintf('Re1 = %.4f\n', best_invalid(3));
+        fprintf('Re2 = %.4f\n', best_invalid(4));
+        fprintf('Av = %.2f\n', best_invalid(5));
+        fprintf('Zin = %.2f\n', best_invalid(6));
+        fprintf('Zout = %.2f\n', best_invalid(7));
+        fprintf('Vce = %.2f\n', best_invalid(8));
+        fprintf('Penalty = %.2f\n', best_invalid(9));
+    else
+        % Sort by Av (largest negative is best)
+        [~, idx] = sort(valid_solutions(:,5)); 
+        best_solution = valid_solutions(idx(1), :);
+        fprintf('\n🎯 Best Valid Solution:\n');
+        fprintf('Rb = %.2f\n', best_solution(1));
+        fprintf('Rc = %.2f\n', best_solution(2));
+        fprintf('Re1 = %.4f\n', best_solution(3));
+        fprintf('Re2 = %.4f\n', best_solution(4));
+        fprintf('Av = %.2f\n', best_solution(5));
+        fprintf('Zin = %.2f\n', best_solution(6));
+        fprintf('Zout = %.2f\n', best_solution(7));
+        fprintf('Vce = %.2f\n', best_solution(8));
+    end
+end
+
+function cost = objective(x, Vcc, Vbe, B, Av_target, Zin_target, Zout_target)
+    [Av, Zin, Zout, Vce] = evaluate_params(x, Vcc, Vbe, B);
+    penalty = compute_penalty(Av, Zin, Zout, Vce, Av_target, Zin_target, Zout_target, Vcc);
+    cost = Av + 1e6 * penalty;
+end
+
+function penalty = compute_penalty(Av, Zin, Zout, Vce, Av_target, Zin_target, Zout_target, Vcc)
+    penalty = 0;
+    if Av < Av_target
+        penalty = penalty + (Av - Av_target)^2;
+    end
+    if Zin < Zin_target
+        penalty = penalty + (Zin_target - Zin)^2;
+    end
+    if Zout > Zout_target
+        penalty = penalty + (Zout - Zout_target)^2;
+    end
+    if Vce < (Vcc/2) - 0.1*Vcc
+        penalty = penalty + ((Vcc/2 - 0.1*Vcc) - Vce)^2;
+    elseif Vce > (Vcc/2) + 0.1*Vcc
+        penalty = penalty + (Vce - (Vcc/2 + 0.1*Vcc))^2;
+    end
+end
+
+function [Av, Zin, Zout, Vce] = evaluate_params(x, Vcc, Vbe, B)
+    Rb = x(1);
+    Rc = x(2);
+    Re1 = x(3);
+    Re2 = x(4);
+
+    I = (Vcc - Vbe) / (Rb + (B+1)*(Re1 + Re2));
+    ZH = 26e-3 / ((B+1)*I) + Re1;
+    Av = -Rc / ZH;
+    Zin = 1 / (1/Rb + 1/(B*ZH));
+    Zout = Rc;
+    Vce = Vcc - B * I * (Rc + Re1 + Re2);
+end
